@@ -39,13 +39,25 @@ const eps     = 1e-30  # round-off error
 const minpop  = 1e-20  # minimum level population
 
 # Directories
-const datadir = "../../data/"
+const datadir = "../data/"
 
 
 ##############################################################################
 # Data file parser
 ##############################################################################
 # Parse molecular data files and create input types.
+
+immutable CollisionPartner
+    collref::String  # collision partner reference name
+    ncoll::Integer  # number of collisional transitions
+    ntemp::Integer  # number of collisional temperatures
+    temp::Array{FloatingPoint,1}  # temperatures
+    lcu::Array{FloatingPoint,1}  # upper state of collision
+    lcl::Array{FloatingPoint,1}  # lower state of collision
+    coll::Array{FloatingPoint,2}  # collision rates, cm^3 s^-1
+end
+const valid_partners = ["h2", "p-h2", "o-h2", "e", "h", "he", "h+"]
+
 
 immutable Molecule
     # Header
@@ -70,21 +82,9 @@ immutable Molecule
 end
 
 
-immutable CollisionPartner
-    collref::String  # collision partner reference name
-    ncoll::Integer  # number of collisional transitions
-    ntemp::Integer  # number of collisional temperatures
-    temp::Array{FloatingPoint,1}  # temperatures
-    lcu::Array{FloatingPoint,1}  # upper state of collision
-    lcl::Array{FloatingPoint,1}  # lower state of collision
-    coll::Array{FloatingPoint,2}  # collision rates, cm^3 s^-1
-end
-const valid_partners = ["h2", "p-h2", "o-h2", "e", "h", "he", "h+"]
-
-
 function readdata(specref::String)
     # Read in data file
-    f = datadir + specref + ".dat" |> open |> readlines
+    f = datadir * specref * ".dat" |> open |> readlines
     f = [strip(l) for l in f]
     # Parse header
     amass = f[4] |> float
@@ -93,8 +93,8 @@ function readdata(specref::String)
     eterm = Array(FloatingPoint, nlev)
     gstat = Array(FloatingPoint, nlev)
     qnum = Array(String, nlev)
-    for ii=8:7+nlev
-        l = f[ii] |> split
+    for (ii,jj) in enumerate(8:7+nlev)
+        l = f[jj] |> split
         eterm[ii] = l[2] |> float
         gstat[ii] = l[3] |> float
         qnum[ii] = l[4]
@@ -107,8 +107,8 @@ function readdata(specref::String)
     spfreq = Array(FloatingPoint, nline)
     eup = Array(FloatingPoint, nline)
     xnu = Array(FloatingPoint, nline)
-    for ii=11+nlev:10+nlev+nline
-        l = f[ii] |> split
+    for (ii,jj) in enumerate(11+nlev:10+nlev+nline)
+        l = f[jj] |> split
         iupp[ii] = l[2] |> int
         ilow[ii] = l[3] |> int
         aeinst[ii] = l[4] |> float
@@ -117,18 +117,43 @@ function readdata(specref::String)
         xnu[ii] = eterm[iupp[ii]] - eterm[ilow[ii]]
     end
     # Parse collision partners
-    npart = f[13+nlev+nline] |> int
+    npart = f[12+nlev+nline] |> int
+    icolliders = 0
     colliders = Array(CollisionPartner, npart)
-    for ii, line in enumerate(f)
+    for (ii,line) in enumerate(f)
         if line == "!COLLISIONS BETWEEN"
-            collref = valid_partners[int(f[ii+1])]
-            # TODO
-            colp = CollisionPartner(collref, ncoll, ntemp, temp, lcu, lcl, coll)
-            colliders[ii] = colp
+            icolliders += 1
+            collref = valid_partners[int(f[ii+1][1:1])]
+            ncoll = f[ii+3] |> int
+            ntemp = f[ii+5] |> int
+            temp = f[ii+7] |> split |> float
+            lcu = Array(Integer, ncoll)
+            lcl = Array(Integer, ncoll)
+            coll = Array(FloatingPoint, ncoll, ntemp)
+            for (jj,kk) in enumerate(9+ii:8+ii+ncoll)
+                row = split(f[kk])
+                lcu[jj] = row[2] |> int
+                lcl[jj] = row[3] |> int
+                coll[jj,:] = float(row[4:end])
+            end
+            colliders[icolliders] = CollisionPartner(collref, ncoll, ntemp, temp, lcu, lcl, coll)
         end
     end
     Molecule(specref, amass, nlev, eterm, gstat, qnum, nline, iupp, ilow,
         aeinst, spfreq, eup, xnu, npart, colliders)
+end
+
+
+function show(io::IO, mol::Molecule)
+    collnames = join([c.collref for c in mol.colliders], ", ")
+    print("Molecule(specref=$(mol.specref), nlev=$(mol.nlev), " *
+          "nline=$(mol.nline), colliders=$(collnames))")
+end
+
+
+function show(io::IO, col::CollisionPartner)
+    print("CollisionPartner(collref=$(col.collref), ncoll=$(col.ncoll), " *
+          "ntemp=$(col.ntemp))")
 end
 
 
@@ -362,3 +387,6 @@ end
 ##############################################################################
 # Create grids of `RunDef`s and add definitions to relevant functions to
 # accept grid input.
+
+
+end  # module
