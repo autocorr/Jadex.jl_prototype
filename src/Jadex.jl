@@ -81,8 +81,7 @@ immutable Molecule
     colliders::Array{CollisionPartner,1}  # list of colliders
 end
 
-
-function readdata(specref::String)
+function Molecule(specref::String)
     # Read in data file
     f = datadir * specref * ".dat" |> open |> readlines
     f = [strip(l) for l in f]
@@ -139,13 +138,15 @@ function readdata(specref::String)
             colliders[icolliders] = CollisionPartner(collref, ncoll, ntemp, temp, lcu, lcl, coll)
         end
     end
+    # TODO throw exception if no colliders
     Molecule(specref, amass, nlev, eterm, gstat, qnum, nline, iupp, ilow,
         aeinst, spfreq, eup, xnu, npart, colliders)
 end
+# TODO interpolate temperatures for a given kinetic temperature
 
 
 function show(io::IO, mol::Molecule)
-    collnames = join([c.collref for c in mol.colliders], ", ")
+    collnames = join([c.collref for c in mol.colliders], ",")
     print("Molecule(specref=$(mol.specref), nlev=$(mol.nlev), " *
           "nline=$(mol.nline), colliders=$(collnames))")
 end
@@ -160,49 +161,132 @@ end
 ##############################################################################
 # Run descriptor
 ##############################################################################
-# Describe a transfer run
+# Top level container to describe a model calculation.
 
 immutable RunDef
-    mol::Molecule
-    outn::String
-    freq::(Real, Real)
-    tkin::Real
-    colps::Array{CollisionPartner, 1}
-    tbg::Real
-    coldens::Real
-    linewidth::Real
-    geometry::String
+    mol::Molecule  # molecule container
+    collref::String  # name of collision partner to use
+    density::Array{FloatingPoint,1}  # number densities of collision partners, cm^-3
+    totdens::FloatingPoint  # total number density of all partners, cm^-3
+    freq::(FloatingPoint, FloatingPoint)  # lower and upper frequency boundaries, GHz
+    tkin::FloatingPoint  # kinetic temperature, K
+    tbg::FloatingPoint  # temperature of background radiation, K
+    cdmol::FloatingPoint  # molecular column density, cm^-2
+    deltav::FloatingPoint  # FWHM line width, cm s^-1
+    geometry::String  # geometry for escape probability
+end
+
+
+##############################################################################
+# Escape probability
+##############################################################################
+# Functions to compute the escape probability
+
+function escprob(τ::Real, geometry::String="sphere")
+    τr = τ / 2.0
+    # Uniform sphere formula from Osterbrock (Astrophysics of Gaseous Nebulae
+    # and Active Galactic Nuclei) Appendix 2 with power law approximations for
+    # large and small tau
+    if geometry == "sphere"
+        if abs(τr) < 0.1
+            β = 1.0 - 0.75 * τr + τr^2 / 2.5 - τr^3 / 6.0 + τr^4 / 17.5
+        elseif abs(τr) > 50
+            β = 0.75 / τr
+        else
+            β = 0.75 / τr * (1.0 - 1.0 / 2τr^2) + (1.0 / τr + 1.0 / 2τr^2) * exp(-τ)
+        end
+    # Expanding sphere, Large Velocity Gradient, or Sobolev case. Formular from
+    # De Jong, Boland, and Dalgarno (1980, A&A 91, 68).
+    # Corrected by factor of 2 in order to return 1 for tau=1.
+    elseif geometry == "lvg"
+        if abs(τr) < 0.01
+            β = 1.0
+        elseif abs(τr) < 7.0
+            β = 2.0 * (1.0 - exp(-2.34τr)) / 4.65τr
+        else
+            β = 4τr * (sqrt(log(τr / sqrt(π)))) \ 2.0
+        end
+    # Slab geometry (e.g. shocks): de Jong, Dalgarno, and Chu (1975), ApJ 199,
+    # 69 (again with power law approximations)
+    elseif geometry == "slab"
+        if abs(3τ) < 0.1
+            β = 1.0 - 1.5 * (τ + τ^2)
+        elseif abs(3τ) > 50.0
+            β = 1.0 / 3τ
+        else
+            β = (1.0 - exp(-3τ)) / 3τ
+        end
+    else
+        throw(ArgumentError())
+    end
+    β
+end
+
+
+##############################################################################
+# Background
+##############################################################################
+# Compute the background radiation field
+
+immutable Background
+    trj::Array{FloatingPoint,1}
+    backi::Array{FloatingPoint,1}
+    totalb::Array{FloatingPoint,1}
+end
+function Background(tbg::Real=2.725, xnu::Array)
+    nline = length(xnu)
+    trj = Array(FloatingPoint, nline)
+    backi = Array(FloatingPoint, nline)
+    totalb = Array(FloatingPoint, nline)
+    for iline=1:nline
+        hnu = fk * xnu[iline] / tbg
+        if hnu >= 160.0
+            backi[iline] = eps
+        else
+            backi[iline] = thc * xnu[iline]^3 / (exp(fk * xnu[iline] / tbg) - 1.0)
+        end
+    end
+    trj[:] = tbg
+    totalb[:] = backi[:]
+    Background(trj, backi, totalb)
 end
 
 
 ##############################################################################
 # Matrix
 ##############################################################################
-# Compute matrix
+# Compute the level populations
 
-function matrix(rundef::RunDef, niter::Integer, conv::Bool)
-    nlev = rundef.mol.nlev
-    totdens
-
-    reducem = false
+function rm_init(nlev::Integer, totdens::FloatingPoint)
     # Initialize rate matrix
     rhs = zeros(nlev+1)
     yrate = zeros(nlev+1, nlev+1)
     for ilev=1:nlev
         for jlev=1:nlev
-            yrate[ilev, jlev] = -eps * totdens
+            yrate[ilev,jlev] = -eps * totdens
         end
         yrate[nlev+1, ilev] = 1.0
         rhs[ilev] = eps * totdens
-        yrate[ilev, nlev+1] = eps * totdens
+        yrate[ilev,nlev+1] = eps * totdens
     end
     rhs[nlev+1] = eps * totdens
+    rhs, yrate
+end
+
+
+function rates(rdef::RunDef, niter::Integer, conv::Bool)
+    mol = rdef.mol
+    nlev = mol.nlev
+    nline = mol.nline
+    reducem = false
+
+    rhs, yrate = rm_init(nlev, rdef.totdens)
 
     if niter == 0
         for iline=1:nline
-            m = iupp[iline]
-            n = ilow[iline]
-            etr = fk * xnu[iline] / trj[iline]
+            m = mol.iupp[iline]
+            n = mol.ilow[iline]
+            etr = fk * mol.xnu[iline] / trj[iline]
             if etr >= 160.0
                 exr = 0.0
             else
@@ -211,15 +295,15 @@ function matrix(rundef::RunDef, niter::Integer, conv::Bool)
         end
     else
         # Subsequent iterations: use escape probability
-        cddv = cdmol / deltav
+        cddv = rdef.cdmol / rdef.deltav
         # Count optically thick lines
         nthick = 0
         nfat = 0
 
         for iline=1:nline
-            xt = xnu[iline]^3.0
-            m  = iupp[iline]
-            n  = ilow[iline]
+            xt = mol.xnu[iline]^3.0
+            m  = mol.iupp[iline]
+            n  = mol.ilow[iline]
             # Calculate source fn
             hnu = fk * xnu[iline] / tex[iline]
             if hnu >= 160.0
@@ -229,23 +313,23 @@ function matrix(rundef::RunDef, niter::Integer, conv::Bool)
             end
             # Calculate line optical depth
             taul[iline] = cddv * (xpop[n] * gstat[m] / gstat[n] - xpop[m]) / (fgaus * xt / aeinst[iline])
-            if taul[iline] > 1e-2 nthick += 1 end
-            if taul[iline] > 1e5  nfat   += 1 end
+            if taul[iline] > 1e-2; nthick += 1 end
+            if taul[iline] > 1e5;  nfat   += 1 end
             # Use escape probability approx for internal intensity
-            beta = escprob[taul[iline]]
-            bnu  = totalb[iline] * beta
-            exr  = bnu / (thc * xt)
+            β   = escprob(taul[iline])
+            bnu = totalb[iline] * β
+            exr = bnu / (thc * xt)
             # Radiative contribution to the rate matrix
-            yrate[m,m] = yrate[m,m] + aeinst[iline] * (beta + exr)
+            yrate[m,m] = yrate[m,m] + aeinst[iline] * (β + exr)
             yrate[n,n] = yrate[n,n] + aeinst[iline] * (gstat[m] * exr / gstat[n])
             yrate[m,n] = yrate[m,n] - aeinst[iline] * (gstat[m] / gstat[n] * exr)
-            yrate[n,m] = yrate[n,m] - aeinst[iline] * (beta + exr)
+            yrate[n,m] = yrate[n,m] - aeinst[iline] * (β + exr)
         end
     end
 
     # Warn user if convergence problems expected
     if niter == 1 && nfat > 0
-        print("*** Warning: Some lines have very high optical depth")
+        warn("Some lines have very high optical depth")
     end
 
     # Contribution for collisional processes to the rate matrix
@@ -342,51 +426,51 @@ function matrix(rundef::RunDef, niter::Integer, conv::Bool)
 end
 
 
-function escprob(τ::Real, geometry::String="sphere")
-    τr = τ / 2.0
-    # Uniform sphere formula from Osterbrock (Astrophysics of Gaseous Nebulae
-    # and Active Galactic Nuclei) Appendix 2 with power law approximations for
-    # large and small tau
-    if geometry == "sphere"
-        if abs(τr) < 0.1
-            β = 1.0 - 0.75 * τr + τr^2 / 2.5 - τr^3 / 6.0 + τr^4 / 17.5
-        elseif abs(τr) > 50
-            β = 0.75 / τr
-        else
-            β = 0.75 / τr * (1.0 - 1.0 / 2τr^2) + (1.0 / τr + 1.0 / 2τr^2) * exp(-τ)
-        end
-    # Expanding sphere, Large Velocity Gradient, or Sobolev case. Formular from
-    # De Jong, Boland, and Dalgarno (1980, A&A 91, 68).
-    # Corrected by factor of 2 in order to return 1 for tau=1.
-    elseif geometry == "lvg"
-        if abs(τr) < 0.01
-            β = 1.0
-        elseif abs(τr) < 7.0
-            β = 2.0 * (1.0 - exp(-2.34τr)) / 4.65τr
-        else
-            β = 4τr * (sqrt(log(τr / sqrt(π)))) \ 2.0
-        end
-    # Slab geometry (e.g. shocks): de Jong, Dalgarno, and Chu (1975), ApJ 199,
-    # 69 (again with power law approximations)
-    elseif geometry == "slab"
-        if abs(3τ) < 0.1
-            β = 1.0 - 1.5 * (τ + τ^2)
-        elseif abs(3τ) > 50.0
-            β = 1.0 / 3τ
-        else
-            β = (1.0 - exp(-3τ)) / 3τ
-        end
-    else
-        throw(ArgumentError())
-    end
-    β
+immutable Background
+    trj::Array{FloatingPoint,1}
+    backi::Array{FloatingPoint,1}
+    totalb::Array{FloatingPoint,1}
 end
+function Background(tbg::Real=2.725, xnu::Array)
+    nline = length(xnu)
+    trj = Array(FloatingPoint, nline)
+    backi = Array(FloatingPoint, nline)
+    totalb = Array(FloatingPoint, nline)
+    for iline=1:nline
+        hnu = fk * xnu[iline] / tbg
+        if hnu >= 160.0
+            backi[iline] = eps
+        else
+            backi[iline] = thc * xnu[iline]^3 / (exp(fk * xnu[iline] / tbg) - 1.0)
+        end
+    end
+    trj[:] = tbg
+    totalb[:] = backi[:]
+    Background(trj, backi, totalb)
+end
+
+
+function solve(rdef::RunDef)
+    # TODO calculate background radiation field
+    for niter=0:maxiter
+        rates!(rdef, niter, conv)
+        if conv
+            println("Finished in $niter iterations.")
+            break
+        end
+    end
+    if ~conv
+        warn("Calculations did not converge in $maxiter iterations.")
+    end
+end
+
 
 ##############################################################################
 # Grid calculator
 ##############################################################################
 # Create grids of `RunDef`s and add definitions to relevant functions to
 # accept grid input.
+# TODO parallelize grid calculations
 
 
 end  # module
