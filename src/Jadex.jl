@@ -22,7 +22,7 @@ const fk      = hplanck * clight / kboltz
 const thc     = 2 * hplanck * clight
 
 # Mathematical constants
-const fgauss  = 1.0645 * 8.0 * pi
+const fgauss  = √π / (2 * √log(2)) * 8π
 
 # Computational constants
 const maxpart = 9      # max number of collision partners
@@ -49,12 +49,12 @@ const datadir = "../data/"
 
 immutable CollisionPartner
     collref::String  # collision partner reference name
-    ncoll::Integer  # number of collisional transitions
-    ntemp::Integer  # number of collisional temperatures
-    temp::Array{FloatingPoint,1}  # temperatures
-    lcu::Array{FloatingPoint,1}  # upper state of collision
-    lcl::Array{FloatingPoint,1}  # lower state of collision
-    coll::Array{FloatingPoint,2}  # collision rates, cm^3 s^-1
+    ncoll::Int  # number of collisional transitions
+    ntemp::Int  # number of collisional temperatures
+    temp::Vector{Float64}  # temperatures
+    lcu::Vector{Float64}  # upper state of collision
+    lcl::Vector{Float64}  # lower state of collision
+    coll::Matrix{Float64}  # collision rates, cm^3 s^-1
 end
 const valid_partners = ["h2", "p-h2", "o-h2", "e", "h", "he", "h+"]
 
@@ -62,24 +62,25 @@ const valid_partners = ["h2", "p-h2", "o-h2", "e", "h", "he", "h+"]
 immutable Molecule
     # Header
     specref::String  # molecule
-    amass::Integer  # molecular weight
+    amass::Int  # molecular weight
     # Energy levels
-    nlev::Integer  # number of energy levels
-    eterm::Array{FloatingPoint,1}  # energy levels, in cm^-1
-    gstat::Array{FloatingPoint,1}  # statistical weights
-    qnum::Array{ASCIIString,1}  # quantum numbers
+    nlev::Int  # number of energy levels
+    eterm::Vector{Float64}  # energy levels, in cm^-1
+    gstat::Vector{Float64}  # statistical weights
+    qnum::Vector{ASCIIString}  # quantum numbers
     # Transitions
-    nline::Integer  # number of radiative transitions
-    iupp::Array{Integer,1}  # upper state
-    ilow::Array{Integer,1}  # lower state
-    aeinst::Array{FloatingPoint,1}  # Einstein A
-    spfreq::Array{FloatingPoint,1}  # spectral line frequencies
-    eup::Array{FloatingPoint,1}  # upper state energy, E_u / k
-    xnu::Array{FloatingPoint,1}  # difference in energy levels between up/low
+    nline::Int  # number of radiative transitions
+    iupp::Vector{Int}  # upper state
+    ilow::Vector{Int}  # lower state
+    aeinst::Vector{Float64}  # Einstein A
+    spfreq::Vector{Float64}  # spectral line frequencies
+    eup::Vector{Float64}  # upper state energy, E_u / k
+    xnu::Vector{Float64}  # difference in energy levels between up/low
     # Collision rates
-    npart::Integer  # number of collision partners
-    colliders::Array{CollisionPartner,1}  # list of colliders
+    npart::Int  # number of collision partners
+    colliders::Vector{CollisionPartner}  # list of colliders
 end
+
 
 function Molecule(specref::String)
     # Read in data file
@@ -89,8 +90,8 @@ function Molecule(specref::String)
     amass = f[4] |> float
     # Parse energies
     nlev = f[6] |> int
-    eterm = Array(FloatingPoint, nlev)
-    gstat = Array(FloatingPoint, nlev)
+    eterm = Array(Float64, nlev)
+    gstat = Array(Float64, nlev)
     qnum = Array(String, nlev)
     for (ii,jj) in enumerate(8:7+nlev)
         l = f[jj] |> split
@@ -100,12 +101,12 @@ function Molecule(specref::String)
     end
     # Parse transitions
     nline = f[9+nlev] |> int
-    iupp = Array(Integer, nline)
-    ilow = Array(Integer, nline)
-    aeinst = Array(FloatingPoint, nline)
-    spfreq = Array(FloatingPoint, nline)
-    eup = Array(FloatingPoint, nline)
-    xnu = Array(FloatingPoint, nline)
+    iupp = Array(Int, nline)
+    ilow = Array(Int, nline)
+    aeinst = Array(Float64, nline)
+    spfreq = Array(Float64, nline)
+    eup = Array(Float64, nline)
+    xnu = Array(Float64, nline)
     for (ii,jj) in enumerate(11+nlev:10+nlev+nline)
         l = f[jj] |> split
         iupp[ii] = l[2] |> int
@@ -126,9 +127,9 @@ function Molecule(specref::String)
             ncoll = f[ii+3] |> int
             ntemp = f[ii+5] |> int
             temp = f[ii+7] |> split |> float
-            lcu = Array(Integer, ncoll)
-            lcl = Array(Integer, ncoll)
-            coll = Array(FloatingPoint, ncoll, ntemp)
+            lcu = Array(Int, ncoll)
+            lcl = Array(Int, ncoll)
+            coll = Array(Float64, ncoll, ntemp)
             for (jj,kk) in enumerate(9+ii:8+ii+ncoll)
                 row = split(f[kk])
                 lcu[jj] = row[2] |> int
@@ -166,14 +167,14 @@ end
 immutable RunDef
     mol::Molecule  # molecule container
     collref::String  # name of collision partner to use
-    density::Array{FloatingPoint,1}  # number densities of collision partners, cm^-3
-    totdens::FloatingPoint  # total number density of all partners, cm^-3
-    freq::(FloatingPoint, FloatingPoint)  # lower and upper frequency boundaries, GHz
-    tkin::FloatingPoint  # kinetic temperature, K
-    tbg::FloatingPoint  # temperature of background radiation, K
-    cdmol::FloatingPoint  # molecular column density, cm^-2
-    deltav::FloatingPoint  # FWHM line width, cm s^-1
-    geometry::String  # geometry for escape probability
+    density::Vector{Float64}  # number densities of collision partners, cm^-3
+    totdens::Float64  # total number density of all partners, cm^-3
+    freq::(Float64, Float64)  # lower and upper frequency boundaries, GHz
+    tkin::Float64  # kinetic temperature, K
+    tbg::Float64  # temperature of background radiation, K
+    cdmol::Float64  # molecular column density, cm^-2
+    deltav::Float64  # FWHM line width, cm s^-1
+    escprob::Function  # escape probability geometry
 end
 
 
@@ -182,44 +183,40 @@ end
 ##############################################################################
 # Functions to compute the escape probability
 
-function escprob(τ::Real, geometry::String="sphere")
+function βsphere(τ::Real)
     τr = τ / 2.0
     # Uniform sphere formula from Osterbrock (Astrophysics of Gaseous Nebulae
     # and Active Galactic Nuclei) Appendix 2 with power law approximations for
     # large and small tau
-    if geometry == "sphere"
-        if abs(τr) < 0.1
-            β = 1.0 - 0.75 * τr + τr^2 / 2.5 - τr^3 / 6.0 + τr^4 / 17.5
-        elseif abs(τr) > 50
-            β = 0.75 / τr
-        else
-            β = 0.75 / τr * (1.0 - 1.0 / 2τr^2) + (1.0 / τr + 1.0 / 2τr^2) * exp(-τ)
-        end
+    abs(τr) < 0.1 ?
+        1.0 - 0.75 * τr + τr^2 / 2.5 - τr^3 / 6.0 + τr^4 / 17.5 :
+    abs(τr) > 50 ?
+        0.75 / τr :
+        0.75 / τr * (1.0 - 1.0 / 2τr^2) + (1.0 / τr + 1.0 / 2τr^2) * exp(-τ)
+end
+
+
+function βlvg(τ::Real)
+    τr = τ / 2.0
     # Expanding sphere, Large Velocity Gradient, or Sobolev case. Formular from
     # De Jong, Boland, and Dalgarno (1980, A&A 91, 68).
     # Corrected by factor of 2 in order to return 1 for tau=1.
-    elseif geometry == "lvg"
-        if abs(τr) < 0.01
-            β = 1.0
-        elseif abs(τr) < 7.0
-            β = 2.0 * (1.0 - exp(-2.34τr)) / 4.65τr
-        else
-            β = 4τr * (sqrt(log(τr / sqrt(π)))) \ 2.0
-        end
+    abs(τr) < 0.01 ?
+        1.0 :
+    abs(τr) < 7.0 ?
+        2.0 * (1.0 - exp(-2.34τr)) / 4.65τr :
+        4τr * √log(τr / √π) \ 2.0
+end
+
+
+function βslab(τ::Real)
     # Slab geometry (e.g. shocks): de Jong, Dalgarno, and Chu (1975), ApJ 199,
     # 69 (again with power law approximations)
-    elseif geometry == "slab"
-        if abs(3τ) < 0.1
-            β = 1.0 - 1.5 * (τ + τ^2)
-        elseif abs(3τ) > 50.0
-            β = 1.0 / 3τ
-        else
-            β = (1.0 - exp(-3τ)) / 3τ
-        end
-    else
-        throw(ArgumentError())
-    end
-    β
+    abs(3τ) < 0.1  ?
+        1.0 - 1.5 * (τ + τ^2) :
+    abs(3τ) > 50.0 ?
+        1.0 / 3τ :
+        (1.0 - exp(-3τ)) / 3τ
 end
 
 
@@ -229,16 +226,18 @@ end
 # Compute the background radiation field
 
 immutable Background
-    trj::Array{FloatingPoint,1}
-    backi::Array{FloatingPoint,1}
-    totalb::Array{FloatingPoint,1}
+    trj::Array{Float64,1}
+    backi::Array{Float64,1}
+    totalb::Array{Float64,1}
 end
-function Background(tbg::Real=2.725, xnu::Array)
+
+
+function BB(xnu::Array, tbg::Real=2.725)
     nline = length(xnu)
-    trj = Array(FloatingPoint, nline)
-    backi = Array(FloatingPoint, nline)
-    totalb = Array(FloatingPoint, nline)
-    for iline=1:nline
+    trj = Array(Float64, nline)
+    backi = Array(Float64, nline)
+    totalb = Array(Float64, nline)
+    for iline = 1:nline
         hnu = fk * xnu[iline] / tbg
         if hnu >= 160.0
             backi[iline] = eps
@@ -257,12 +256,16 @@ end
 ##############################################################################
 # Compute the level populations
 
-function rm_init(nlev::Integer, totdens::FloatingPoint)
+type Solution
+    rhs::Vector{Float64}
+    yrate::Matrix{Float64}
+end
+function Solution(nlev::Int, totdens::Float64)
     # Initialize rate matrix
     rhs = zeros(nlev+1)
     yrate = zeros(nlev+1, nlev+1)
-    for ilev=1:nlev
-        for jlev=1:nlev
+    for ilev = 1:nlev
+        for jlev = 1:nlev
             yrate[ilev,jlev] = -eps * totdens
         end
         yrate[nlev+1, ilev] = 1.0
@@ -270,28 +273,24 @@ function rm_init(nlev::Integer, totdens::FloatingPoint)
         yrate[ilev,nlev+1] = eps * totdens
     end
     rhs[nlev+1] = eps * totdens
-    rhs, yrate
+    # Initialized solution container
+    Solution(rhs, yrate)
 end
 
 
-function rates(rdef::RunDef, niter::Integer, conv::Bool)
-    mol = rdef.mol
-    nlev = mol.nlev
-    nline = mol.nline
-    reducem = false
-
-    rhs, yrate = rm_init(nlev, rdef.totdens)
-
+# Contribution of radiative processed to the rate matrix. Modifies the solution in place.
+function rad_proc!(sol::Solution, rdef::RunDef, bg::Background, niter)
+    # First iteration, use background intensity
     if niter == 0
-        for iline=1:nline
-            m = mol.iupp[iline]
-            n = mol.ilow[iline]
-            etr = fk * mol.xnu[iline] / trj[iline]
-            if etr >= 160.0
-                exr = 0.0
-            else
-                exr = 1.0 / (exp(etr) - 1.0)
-            end
+        for ii = 1:mol.nline
+            mm = mol.iupp[ii]
+            nn = mol.ilow[ii]
+            etr = fk * mol.xnu[ii] / bg.trj[ii]
+            exr = etr >= 160.0 ? 0.0 : 1.0 / (exp(etr) - 1.0)
+            sol.yrate[mm,mm] += mol.aeinst[ii] * (1.0 + exr)
+            sol.yrate[nn,nn] += mol.aeinst[ii] * gstat[mm] * exr / gstat[nn]
+            sol.yrate[mm,nn] -= mol.aeinst[ii] * (gstat[mm] / gstat[nn]) * exr
+            sol.yrate[nn,mm] -= mol.aeinst[ii] * (1.0 + exr)
         end
     else
         # Subsequent iterations: use escape probability
@@ -299,8 +298,7 @@ function rates(rdef::RunDef, niter::Integer, conv::Bool)
         # Count optically thick lines
         nthick = 0
         nfat = 0
-
-        for iline=1:nline
+        for iline = 1:nline
             xt = mol.xnu[iline]^3.0
             m  = mol.iupp[iline]
             n  = mol.ilow[iline]
@@ -325,118 +323,116 @@ function rates(rdef::RunDef, niter::Integer, conv::Bool)
             yrate[m,n] = yrate[m,n] - aeinst[iline] * (gstat[m] / gstat[n] * exr)
             yrate[n,m] = yrate[n,m] - aeinst[iline] * (β + exr)
         end
+        # Warn user if convergence problems expected
+        if niter == 1 && nfat > 0
+            warn("Some lines have very high optical depth")
+        end
     end
+end
 
-    # Warn user if convergence problems expected
-    if niter == 1 && nfat > 0
-        warn("Some lines have very high optical depth")
+
+# Contribution for collisional processes to the rate matrix
+function col_proc!(sol, mol)
+    nlev = mol.nlev
+    for ii = 1:nlev
+        sol.yrate[ii,ii] = sol.yrate[ii,ii] + mol.ctot[ii]
+        for jj = 1:nlev
+            if ii != jj
+                sol.yrate[ii,jj] -= mol.crate[jj,ii]
+            end
+        end
     end
+end
+
+
+# Level populations are the normalized RHS components
+function pop_proc!(sol)
+    total = sum(sol.rhs)
+    sol.xpopold = copy(sol.xpop)
+    # Limit population to minpop
+    for ii = 1:nlev
+        sol.xpop[ii] = max(minpop, sol.rhs[ii] / total)
+    end
+    # if first iteration, no old population
+    if niter == 0; sol.xpopold = copy(sol.xpop) end
+end
+
+
+function rates(rdef::RunDef, bg::Background, niter::Int, conv::Bool)
+    mol = rdef.mol
+    nlev = mol.nlev
+    nline = mol.nline
+
+    sol = Solution(mol, rdef)
+    rhs, yrate = yr_init(nlev, rdef.totdens)
+
+    # Contribution of radiative processed to the rate matrix
+    rad_proc!(sol, rdef, bg, niter)
 
     # Contribution for collisional processes to the rate matrix
-    for ilev=1:nlev
-        yrate[ilev,ilev] = yrate[ilev,ilev] + ctot[ilev]
-        for jlev=1:nlev
-            if ilev != jlev
-                yrate[ilev,jlev] -= crate[jlev,ilev]
-            end
-        end
-    end
+    col_proc!(sol, mol)
 
-    if reducem
-        # An auxillary array is passed to the linear equation solver after
-        # renormalization. The array `yrate` retains the original matrix
-        # elements.
-        uarray = copy(yrate)
-        # Test whether the matrix should be reduced to exclude the radiatively
-        # coupled levels.
-        redcrit = 10.0 * tkin / fk
-        nreduce = 0
-        for ilev=1:nlev
-            if eterm[ilev] <= redcrit
-                nreduce += 1
-            end
-        end
-        # We now separate the collisionally coupled levels from thsoe that are
-        # now coupled mainly by radiatve processes, compute an effective
-        # cascade matrix for transfer rates from one low-lying level to another
-        # and then solve this reduced system of equations explicitly for the
-        # low-lying levels only.
-        for jlev=1:nreduce
-            for ilev=1:nreduce
-                for klev=nreduce+1:nlev
-                    uarray[ilev,jlev] = abs(yrate[klev,jlev] * yrate[ilev,klev] / yrate[klev,klev]) + uarray[ilev,jlev]
-                end
-            end
-        end
-        # Invert the reduced matrix `uarray`
-        # TODO ccall uarray
-    else
-        # TODO ccall yrate
-    end
+    # Invert the rate matrix `yrate`
+    # TODO ccall on yrate
 
     # Level populations are the normalized RHS components
-    total = sum(rhs)
-
-    # Limit population to minpop
-    for ilev=1:nlev
-        xpopold[ilev] = xpop[ilev]
-        xpop[ilev] = max(minpop, rhs[ilev] / total)
-        # if first iteration, no old population
-        if niter == 0
-            xpopold[ilev] = xpop[ilev]
-        end
-    end
+    pop_proc!(sol, niter)
 
     # Compute excitation temperatures of the lines
     tsum = 0.0
-    for iline=1:nline
-        m  = iupp[iline]
-        n  = ilow[iline]
-        xt = xnu[iline]^3
+    for ii = 1:nline
+        mm = iupp[ii]
+        nn = ilow[ii]
+        xt = xnu[ii]^3
         if niter == 0
-            if xpop[n] <= minpop || xpop[m] <= minpop
-                tex[iline] = totalb[iline]
+            if xpop[nn] <= minpop || xpop[mm] <= minpop
+                tex[ii] = totalb[ii]
             else
-                tex[iline] = fk * xnu[iline] / (log(xpop[n] * gstat[m] / (xpop[m] * gstat[n])))
+                tex[ii] = fk * xnu[ii] / (log(xpop[nn] * gstat[mm] / (xpop[mm] * gstat[nn])))
             end
         else
-            if xpop[n] <= minpop || xpop[m] <= minpop
-                thistex = tex[iline]
+            if xpop[nn] <= minpop || xpop[mm] <= minpop
+                itex = tex[ii]
             else
-                thistex = fk * xnu[iline]
+                itex = fk * xnu[ii]
             end
-            if taul[iline] > 0.01
-                tsum += abs((thistex - tex[iline]) / thistex)
+            # Only thick lines count for convergence
+            if taul[ii] > 0.01
+                tsum += abs((itex - tex[ii]) / itex)
             end
-            tex[iline] = 0.5 * (thistex + tex[iline])
-            taul[iline] = cddv * (xpop[n] * gstat[m] / gstat[n] - xpop[m]) / (fgauss * xt / aeinst[iline])
+            # Update excitation temperature and optical depth
+            tex[ii] = 0.5 * (itex + tex[ii])
+            taul[ii] = cddv * (xpop[nn] * gstat[mm] / gstat[nn] - xpop[mm]) / (fgauss * xt / aeinst[ii])
         end
     end
 
     # Introduce a minimum number of iterations
     if niter >= miniter
-        if nthick == 0; conv = true end
-        if tsum / nthick < ccrit; conv = true end
+        if nthick == 0
+            conv = true
+        elseif tsum / nthick < ccrit
+            conv = true
+        end
     end
 
     # Now do the underrelaxation
-    for ilev=1:nlev
-        xpop[ilev] = 0.3 * xpop[ilev] + 0.7 * xpopold[ilev]
+    for ii = 1:nlev
+        xpop[ii] = 0.3 * xpop[ii] + 0.7 * xpopold[ii]
     end
 end
 
 
 immutable Background
-    trj::Array{FloatingPoint,1}
-    backi::Array{FloatingPoint,1}
-    totalb::Array{FloatingPoint,1}
+    trj::Vector{Float64}
+    backi::Vector{Float64}
+    totalb::Vector{Float64}
 end
-function Background(tbg::Real=2.725, xnu::Array)
+function BB(tbg::Real, xnu::Array)
     nline = length(xnu)
-    trj = Array(FloatingPoint, nline)
-    backi = Array(FloatingPoint, nline)
-    totalb = Array(FloatingPoint, nline)
-    for iline=1:nline
+    trj = Array(Float64, nline)
+    backi = Array(Float64, nline)
+    totalb = Array(Float64, nline)
+    for iline = 1:nline
         hnu = fk * xnu[iline] / tbg
         if hnu >= 160.0
             backi[iline] = eps
@@ -450,9 +446,8 @@ function Background(tbg::Real=2.725, xnu::Array)
 end
 
 
-function solve(rdef::RunDef)
-    # TODO calculate background radiation field
-    for niter=0:maxiter
+function solve(rdef::RunDef, bg::Background)
+    for niter = 0:maxiter
         rates!(rdef, niter, conv)
         if conv
             println("Finished in $niter iterations.")
