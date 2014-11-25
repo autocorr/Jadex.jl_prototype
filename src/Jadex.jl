@@ -2,9 +2,11 @@ module Jadex
 ### Sections
 # * Constants
 # * Data file parser
+# * Run descriptor
+# * Escape probability
+# * Background
+# * Matrix
 # * Grid calculator
-### TODO
-# *
 ###
 
 import Base: show, showcompact
@@ -23,13 +25,6 @@ const thc     = 2 * hplanck * clight
 
 # Mathematical constants
 const fgauss  = √π / (2 * √log(2)) * 8π
-
-# Computational constants
-const maxpart = 9      # max number of collision partners
-const maxtemp = 99     # max number of collision temperatures
-const maxlev  = 2999   # max number of energy levels
-const mxline  = 99999  # max number of energy levels
-const maxcoll = 99999  # max number of collisional transitions
 
 const miniter = 10     # minimum number of iterations
 const maxiter = 9999   # maximum number of iterations
@@ -138,10 +133,13 @@ function Molecule(specref::String)
         end
     end
     # TODO throw exception if no colliders
+    if length(colliders) == 0
+        warn("No colliders found.")
+        throw(DomainError())
+    end
     Molecule(specref, amass, nlev, eterm, gstat, qnum, nline, iupp, ilow,
         aeinst, spfreq, eup, xnu, npart, colliders)
 end
-# TODO interpolate temperatures for a given kinetic temperature
 
 
 function show(io::IO, mol::Molecule)
@@ -169,10 +167,10 @@ immutable RunDef
     totdens::Float64  # total number density of all partners, cm^-3
     freq::(Float64, Float64)  # lower and upper frequency boundaries, GHz
     tkin::Float64  # kinetic temperature, K
-    tbg::Float64  # temperature of background radiation, K
     cdmol::Float64  # molecular column density, cm^-2
     deltav::Float64  # FWHM line width, cm s^-1
     escprob::Function  # escape probability geometry
+    bg::Background  # radiation field background
 end
 
 
@@ -224,13 +222,13 @@ end
 # Compute the background radiation field
 
 immutable Background
-    trj::Array{Float64,1}
-    backi::Array{Float64,1}
-    totalb::Array{Float64,1}
+    trj::Vector{Float64}  # radiation temperatures
+    backi::Vector{Float64}  # background intensity
+    totalb::Vector{Float64}  # total flux
 end
 
 
-function BB(xnu::Array, tbg::Real=2.725)
+function bb(xnu::Array, tbg::Real=2.725)
     nline = length(xnu)
     trj = Array(Float64, nline)
     backi = Array(Float64, nline)
@@ -257,33 +255,39 @@ end
 type Solution
     rhs::Vector{Float64}
     yrate::Matrix{Float64}
+    # TODO add further quantities
 end
-function Solution(nlev::Int, totdens::Float64)
+function Solution(rdef::RunDef)
+    mol = rdef.mol
+    nlev = mol.nlev
     # Initialize rate matrix
     rhs = zeros(nlev+1)
     yrate = zeros(nlev+1, nlev+1)
     for ilev = 1:nlev
         for jlev = 1:nlev
-            yrate[ilev,jlev] = -eps * totdens
+            yrate[ilev,jlev] = -eps * rdef.totdens
         end
         yrate[nlev+1, ilev] = 1.0
-        rhs[ilev] = eps * totdens
-        yrate[ilev,nlev+1] = eps * totdens
+        rhs[ilev] = eps * rdef.totdens
+        yrate[ilev,nlev+1] = eps * rdef.totdens
     end
-    rhs[nlev+1] = eps * totdens
+    rhs[nlev+1] = eps * rdef.totdens
+    # TODO Process and interpolate molecule data
     # Initialized solution container
     Solution(rhs, yrate)
 end
 
 
 # Contribution of radiative processed to the rate matrix. Modifies the solution in place.
-function rad_proc!(sol::Solution, rdef::RunDef, bg::Background, niter)
+function rad_proc!(sol::Solution, rdef::RunDef, niter)
+    # TODO need to access correct attributes of container types, right now
+    # they are just referred to and will get access errors
     # First iteration, use background intensity
     if niter == 0
         for ii = 1:mol.nline
             mm = mol.iupp[ii]
             nn = mol.ilow[ii]
-            etr = fk * mol.xnu[ii] / bg.trj[ii]
+            etr = fk * mol.xnu[ii] / rdf.bg.trj[ii]
             exr = etr >= 160.0 ? 0.0 : 1.0 / (exp(etr) - 1.0)
             sol.yrate[mm,mm] += mol.aeinst[ii] * (1.0 + exr)
             sol.yrate[nn,nn] += mol.aeinst[ii] * gstat[mm] * exr / gstat[nn]
@@ -356,26 +360,19 @@ function pop_proc!(sol)
 end
 
 
-function rates(rdef::RunDef, bg::Background, niter::Int, conv::Bool)
+function rates(sol::Solution, rdef::RunDef, niter::Int, conv::Bool)
     mol = rdef.mol
     nlev = mol.nlev
     nline = mol.nline
 
-    sol = Solution(mol, rdef)
-    rhs, yrate = yr_init(nlev, rdef.totdens)
-
     # Contribution of radiative processed to the rate matrix
-    rad_proc!(sol, rdef, bg, niter)
-
+    rad_proc!(sol, rdef, niter)
     # Contribution for collisional processes to the rate matrix
     col_proc!(sol, mol)
-
     # Invert the rate matrix `yrate`
     # TODO ccall on yrate
-
     # Level populations are the normalized RHS components
     pop_proc!(sol, niter)
-
     # Compute excitation temperatures of the lines
     tsum = 0.0
     for ii = 1:nline
@@ -420,33 +417,10 @@ function rates(rdef::RunDef, bg::Background, niter::Int, conv::Bool)
 end
 
 
-immutable Background
-    trj::Vector{Float64}
-    backi::Vector{Float64}
-    totalb::Vector{Float64}
-end
-function BB(tbg::Real, xnu::Array)
-    nline = length(xnu)
-    trj = Array(Float64, nline)
-    backi = Array(Float64, nline)
-    totalb = Array(Float64, nline)
-    for iline = 1:nline
-        hnu = fk * xnu[iline] / tbg
-        if hnu >= 160.0
-            backi[iline] = eps
-        else
-            backi[iline] = thc * xnu[iline]^3 / (exp(fk * xnu[iline] / tbg) - 1.0)
-        end
-    end
-    trj[:] = tbg
-    totalb[:] = backi[:]
-    Background(trj, backi, totalb)
-end
-
-
-function solve(rdef::RunDef, bg::Background)
+function solve(rdef::RunDef)
+    sol = Solution(rdef)
     for niter = 0:maxiter
-        rates!(rdef, niter, conv)
+        rates!(sol, rdef, niter, conv)
         if conv
             println("Finished in $niter iterations.")
             break
