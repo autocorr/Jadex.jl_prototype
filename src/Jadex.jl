@@ -80,8 +80,6 @@ immutable Molecule
     npart::Int  # number of collision partners
     colliders::Vector{CollisionPartner}  # list of colliders
 end
-
-
 function Molecule(specref::String)
     # Read in data file
     f = datadir * specref * ".dat" |> open |> readlines
